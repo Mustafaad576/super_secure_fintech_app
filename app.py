@@ -100,7 +100,7 @@ def get_user_by_username(username):
     cur.execute("SELECT * FROM users WHERE username = ?", (username,))
     row = cur.fetchone()
     return row
-SESSION_TIMEOUT_MINUTES = 15
+SESSION_TIMEOUT_MINUTES = 1
 def create_session(user_row):
     st.session_state["user"] = {"id": user_row["id"], "username": user_row["username"], "login_time": datetime.utcnow().isoformat()}
     st.session_state["last_activity"] = datetime.utcnow()
