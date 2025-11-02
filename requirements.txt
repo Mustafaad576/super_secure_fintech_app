@@ -1,0 +1,7 @@
+streamlit
+bcrypt
+cryptography
+sqlalchemy
+pandas
+python-magic
+python-multipart
