@@ -70,7 +70,8 @@ def page_login():
         if user and check_password(user[2], password):
             st.session_state["logged_in"] = True
             st.session_state["username"] = username
-            st.success(f"Welcome back, {username}!")
+            st.success(f"Welcome, {username}!")
+            st.session_state["page"] = "Dashboard"
         else:
             st.error("Invalid username or password")
 
@@ -97,6 +98,21 @@ def page_encrypt():
         else:
             st.warning("Please enter data to encrypt")
 
+def page_dashboard():
+    st.title("💼 FinTech Dashboard")
+    st.subheader(f"Welcome, {st.session_state['username']}!")
+
+    # Add a visible logout button
+    if st.button("Logout"):
+        st.session_state.clear()
+        st.success("You have been logged out successfully.")
+        st.stop()
+
+    st.write("""
+    This dashboard simulates secure data handling.
+    You can test session management, encryption, and secure login.
+    """)
+
 def page_about():
     st.title("ℹ️ About This App")
     st.write("""
@@ -106,22 +122,28 @@ def page_about():
 
 # ------------------ Main App ------------------
 def main():
-    st.sidebar.title("🔐 Secure FinTech App")
-    menu = st.sidebar.radio("Navigation", ["Login", "Register", "Encrypt", "About"])
-
-    if menu == "Login":
-        page_login()
-    elif menu == "Register":
-        page_register()
-    elif menu == "Encrypt":
-        if st.session_state.get("logged_in"):
-            page_encrypt()
-        else:
-            st.warning("Please login first to access this page.")
-    elif menu == "About":
-        page_about()
-
-if __name__ == "__main__":
     create_table()
     insert_default_user()
+
+    st.sidebar.title("🔐 Secure FinTech App")
+
+    # Handle logged-in user
+    if "logged_in" in st.session_state and st.session_state["logged_in"]:
+        menu = st.sidebar.radio("Navigation", ["Dashboard", "Encrypt", "About"])
+        if menu == "Dashboard":
+            page_dashboard()
+        elif menu == "Encrypt":
+            page_encrypt()
+        elif menu == "About":
+            page_about()
+    else:
+        menu = st.sidebar.radio("Navigation", ["Login", "Register", "About"])
+        if menu == "Login":
+            page_login()
+        elif menu == "Register":
+            page_register()
+        elif menu == "About":
+            page_about()
+
+if __name__ == "__main__":
     main()
