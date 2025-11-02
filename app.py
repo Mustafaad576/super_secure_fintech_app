@@ -96,7 +96,7 @@ def page_login():
         if user_rec and verify_password(password, user_rec["password_hash"]):
             create_session(input_username)
             st.success(f"Welcome, {sanitize_for_display(input_username)}!")
-            st.experimental_rerun()
+            st.rerun()
         else:
             log_action(input_username, "failed_login")
             st.error("Invalid credentials.")
