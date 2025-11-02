@@ -154,7 +154,7 @@ def page_dashboard():
     if st.button("Logout"):
         logout_session()
         st.success("Logged out.")
-        st.experimental_rerun()
+        st.rerun()
 
 def page_encrypt_tool():
     if not is_session_active():
