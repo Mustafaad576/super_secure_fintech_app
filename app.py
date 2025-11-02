@@ -1,117 +1,69 @@
-# app.py - Secure FinTech demo (improved)
 import streamlit as st
-import sqlite3
-import bcrypt
 import re
-from datetime import datetime, timedelta
+import hashlib
 import html
-
-# --- Config ---
-DB_PATH = "users.db"
+from datetime import datetime, timedelta
+import binascii
 SESSION_TIMEOUT_MINUTES = 15
-USERNAME_MAX_LEN = 50
 PASSWORD_MIN_LEN = 8
+PW_POLICY_RE = re.compile(
+    rf'^(?=.*[0-9])(?=.*[A-Z])(?=.*[a-z])(?=.*[!@#\$%\^&\*]).{{{PASSWORD_MIN_LEN},}}$'
+)
+USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,50}$') 
+try:
+    import bcrypt
+    BCRYPT_AVAILABLE = True
+except Exception:
+    BCRYPT_AVAILABLE = False
 
-# --- Helpers ---
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash BLOB NOT NULL,
-            email TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            action TEXT,
-            meta TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
+USERS = {}
+AUDIT_LOGS = []
 def seed_admin():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE username = ?", ("admin",))
-    if not cur.fetchone():
-        pw = b"Test@1234"
-        ph = bcrypt.hashpw(pw, bcrypt.gensalt())
-        cur.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ("admin", ph))
-        conn.commit()
-    conn.close()
+    if 'admin' not in USERS:
+        pw = "Test@1234"
+        if BCRYPT_AVAILABLE:
+            ph = bcrypt.hashpw(pw.encode('utf-8'), bcrypt.gensalt())
+        else:
+            ph = hashlib.sha256(pw.encode('utf-8')).hexdigest()
+        USERS['admin'] = {"password_hash": ph, "created_at": datetime.utcnow()}
+def now_iso():
+    return datetime.utcnow().isoformat()
 
-def log_action(user_id, action, meta=""):
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("INSERT INTO audit_logs (user_id, action, meta) VALUES (?, ?, ?)", (user_id, action, meta))
-        conn.commit()
-        conn.close()
-    except Exception:
-        # swallow to avoid exposing internal errors to users
-        pass
+def log_action(user, action, meta=""):
+    AUDIT_LOGS.insert(0, {"ts": now_iso(), "user": user, "action": action, "meta": meta})
+    # keep log size reasonable
+    if len(AUDIT_LOGS) > 1000:
+        AUDIT_LOGS.pop()
 
-# --- Validation ---
-PW_POLICY_RE = re.compile(r'^(?=.*[0-9])(?=.*[A-Z])(?=.*[a-z])(?=.*[!@#\$%\^&\*]).{%d,}$' % PASSWORD_MIN_LEN)
+def hash_password(password: str):
+    if BCRYPT_AVAILABLE:
+        return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+    else:
+        return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+def verify_password(password: str, stored):
+    if BCRYPT_AVAILABLE:
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), stored)
+        except Exception:
+            return False
+    else:
+        return hashlib.sha256(password.encode('utf-8')).hexdigest() == stored
+
+def sanitize_for_display(s: str) -> str:
+    return html.escape(str(s))
+
+def is_valid_username(u: str) -> bool:
+    return bool(USERNAME_RE.match(u))
 
 def is_strong_password(pw: str) -> bool:
     return bool(PW_POLICY_RE.match(pw))
-
-def sanitize_for_display(s: str) -> str:
-    # sanitize output to prevent XSS when reflecting input back
-    return html.escape(s)
-
-# --- DB operations ---
-def create_user(username: str, password: str, email: str = None) -> (bool, str):
-    username = username.strip()
-    if len(username) == 0 or len(username) > USERNAME_MAX_LEN:
-        return False, f"Username must be 1..{USERNAME_MAX_LEN} characters."
-    if not is_strong_password(password):
-        return False, f"Password must be at least {PASSWORD_MIN_LEN} chars and include upper, lower, digit and special char."
-    try:
-        pw_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)", (username, pw_hash, email))
-        conn.commit()
-        user_id = cur.lastrowid
-        conn.close()
-        log_action(user_id, "register", f"username={username}")
-        return True, "User registered successfully."
-    except sqlite3.IntegrityError:
-        return False, "Username already exists."
-    except Exception as e:
-        # log and return generic error
-        log_action(None, "error", f"create_user_error:{str(e)}")
-        return False, "An internal error occurred. Please contact the administrator."
-
-def get_user(username: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (username,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-# --- Session helpers ---
-def create_session(user_row):
-    st.session_state['user'] = {"id": user_row["id"], "username": user_row["username"]}
+def create_session(username: str):
+    st.session_state['user'] = username
     st.session_state['last_activity'] = datetime.utcnow()
+    log_action(username, "login")
 
-def is_session_active():
+def is_session_active() -> bool:
     if 'user' not in st.session_state:
         return False
     if 'last_activity' not in st.session_state:
@@ -121,136 +73,175 @@ def is_session_active():
 def refresh_activity():
     st.session_state['last_activity'] = datetime.utcnow()
 
-def logout_user():
+def logout_session():
     user = st.session_state.get('user')
     if user:
-        log_action(user.get('id'), "logout", f"user={user.get('username')}")
-    for k in list(st.session_state.keys()):
+        log_action(user, "logout")
+    keys = list(st.session_state.keys())
+    for k in keys:
         del st.session_state[k]
-
-# --- Pages ---
 def page_login():
     st.header("🔐 Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    if not BCRYPT_AVAILABLE:
+        st.warning("bcrypt not available in this environment — using SHA256 fallback for demo only.")
+    username = st.text_input("Username", key="login_user")
+    password = st.text_input("Password", type="password", key="login_pw")
+
     if st.button("Login"):
-        try:
-            row = get_user(username)
-            if row and bcrypt.checkpw(password.encode('utf-8'), row['password_hash']):
-                create_session(row)
-                log_action(row['id'], "login", f"user={username}")
-                st.success(f"Welcome, {sanitize_for_display(username)}!")
-                st.experimental_rerun()
-            else:
-                log_action(None, "failed_login", f"username={username}")
-                st.error("Invalid credentials.")
-        except Exception as e:
-            log_action(None, "error", f"login_error:{str(e)}")
-            st.error("An internal error occurred. The original error has been logged.")
+        if not username or not password:
+            st.error("Enter both username and password.")
+            return
+        input_username = username.strip()
+        user_rec = USERS.get(input_username)
+        if user_rec and verify_password(password, user_rec["password_hash"]):
+            create_session(input_username)
+            st.success(f"Welcome, {sanitize_for_display(input_username)}!")
+            st.experimental_rerun()
+        else:
+            log_action(input_username, "failed_login")
+            st.error("Invalid credentials.")
 
 def page_register():
     st.header("🧾 Register")
-    new_username = st.text_input("Choose username", key="reg_user")
-    new_email = st.text_input("Email (optional)", key="reg_email")
-    new_password = st.text_input("Choose password", type="password", key="reg_pw")
-    confirm = st.text_input("Confirm password", type="password", key="reg_confirm")
+    st.write("Choose a username (letters, numbers, underscore) and a strong password.")
+    new_user = st.text_input("Username", key="reg_user")
+    new_password = st.text_input("Password", type="password", key="reg_pw")
+    confirm_pw = st.text_input("Confirm password", type="password", key="reg_confirm")
+
     if st.button("Register"):
-        if new_password != confirm:
+        if not new_user or not new_password or not confirm_pw:
+            st.error("All fields are required.")
+            return
+        if not is_valid_username(new_user):
+            st.error("Username invalid — use letters, numbers, underscore; max 50 chars.")
+            return
+        if new_password != confirm_pw:
             st.error("Passwords do not match.")
-        else:
-            ok, msg = create_user(new_username, new_password, new_email)
-            if ok:
-                st.success(msg + " You can now log in.")
-            else:
-                st.error(msg)
+            return
+        if not is_strong_password(new_password):
+            st.error(f"Password must be >={PASSWORD_MIN_LEN} chars and include upper, lower, digit, and symbol.")
+            return
+        if new_user in USERS:
+            st.error("Username already exists.")
+            return
+        ph = hash_password(new_password)
+        USERS[new_user] = {"password_hash": ph, "created_at": datetime.utcnow()}
+        log_action(new_user, "register")
+        st.success("Account created. You can now log in.")
 
 def page_dashboard():
     if not is_session_active():
-        logout_user()
-        st.warning("Session expired or not logged in; please log in.")
+        logout_session()
+        st.warning("Session expired or not logged in. Please log in.")
         return
     refresh_activity()
     st.header("💼 Dashboard")
-    st.subheader(f"Welcome, {sanitize_for_display(st.session_state['user']['username'])}!")
+    user = st.session_state['user']
+    st.subheader(f"Welcome, {sanitize_for_display(user)}")
+    st.write("Quick FinTech demo: simulate a transaction or use the encryption tool.")
+    amount = st.number_input("Amount (PKR)", min_value=0.0, step=0.01)
+    recipient = st.text_input("Recipient username")
+    if st.button("Send"):
+        if amount <= 0:
+            st.error("Enter a positive amount.")
+        elif not recipient or not is_valid_username(recipient):
+            st.error("Enter a valid recipient username.")
+        else:
+            log_action(user, "transfer", f"to={recipient};amount={amount}")
+            st.success(f"Sent PKR {amount:.2f} to {sanitize_for_display(recipient)}")
+
+    st.markdown("---")
     if st.button("Logout"):
-        logout_user()
+        logout_session()
         st.success("Logged out.")
         st.experimental_rerun()
-    st.write("Use the sidebar to access other pages. Audit logs are recorded for actions.")
 
-def page_encrypt():
+def page_encrypt_tool():
     if not is_session_active():
-        st.warning("Please log in to use this tool.")
+        st.warning("Please log in to use the encryption tool.")
         return
     refresh_activity()
-    st.header("🔒 Simple Encrypt / Decrypt Demo (Base64)")
-    txt = st.text_area("Text to encrypt/decrypt")
+    st.header("🔐 Encrypt / Decrypt Demo (hex encode)")
+    txt = st.text_area("Enter text to encrypt/decrypt", height=120)
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Encrypt"):
-            if txt:
-                enc = txt.encode('utf-8').hex()
-                st.code(enc)
-                log_action(st.session_state['user']['id'], "encrypt", f"len={len(txt)}")
+        if st.button("Encrypt (to hex)"):
+            if not txt:
+                st.warning("Enter text to encrypt.")
             else:
-                st.warning("Enter text first.")
+                enc = binascii.hexlify(txt.encode('utf-8')).decode('utf-8')
+                st.code(enc)
+                log_action(st.session_state['user'], "encrypt", f"len={len(txt)}")
     with col2:
-        if st.button("Decrypt"):
-            if txt:
+        if st.button("Decrypt (from hex)"):
+            if not txt:
+                st.warning("Enter hex string to decrypt.")
+            else:
                 try:
-                    dec = bytes.fromhex(txt).decode('utf-8')
+                    dec = binascii.unhexlify(txt.encode('utf-8')).decode('utf-8')
                     st.code(dec)
-                    log_action(st.session_state['user']['id'], "decrypt", f"len={len(dec)}")
+                    log_action(st.session_state['user'], "decrypt", f"len={len(dec)}")
                 except Exception:
-                    st.error("Invalid token or cannot decrypt.")
+                    st.error("Invalid hex string.")
 
 def page_logs():
     if not is_session_active():
         st.warning("Please log in to view logs.")
         return
     refresh_activity()
-    st.header("📜 Audit Logs")
-    conn = get_conn()
-    df = conn.execute("SELECT id, user_id, action, meta, created_at FROM audit_logs ORDER BY created_at DESC LIMIT 200").fetchall()
-    conn.close()
-    # render safely
-    rows = [[r['id'], r['user_id'], sanitize_for_display(str(r['action'])), sanitize_for_display(str(r['meta'])), r['created_at']] for r in df]
-    st.table(rows)
+    st.header("📋 Audit Logs (most recent first)")
+    if not AUDIT_LOGS:
+        st.info("No logs yet.")
+        return
+    rows = AUDIT_LOGS[:200]
+    safe_rows = [
+        {
+            "ts": r["ts"],
+            "user": sanitize_for_display(r["user"]) if r["user"] else "(anon)",
+            "action": sanitize_for_display(r["action"]),
+            "meta": sanitize_for_display(r["meta"])
+        }
+        for r in rows
+    ]
+    st.table(safe_rows)
 
 def page_about():
-    st.header("ℹ️ About")
-    st.write("Secure FinTech demo app — input validation, password hashing (bcrypt), session management, and logging.")
+    st.header("ℹ️ About / Notes")
+    st.write("""
+    This demo uses **in-memory** storage (no database) to avoid file permission issues on Streamlit Cloud.
+    - Default seeded admin: **admin / Test@1234**
+    - Password hashing uses bcrypt if available; otherwise SHA256 fallback (note this in your report).
+    - Audit logs are kept in memory for demoing test cases.
+    """)
 
-# --- Main ---
 def main():
-    init_db()
     seed_admin()
-    st.sidebar.title("Secure FinTech")
+    st.sidebar.title("🔒 Secure FinTech Demo (in-memory)")
     if 'user' in st.session_state and not is_session_active():
-        logout_user()
-    # menu based on auth status
+        logout_session()
+        st.warning("Session timed out. Please log in again.")
+
     if 'user' in st.session_state:
-        # logged in
-        page = st.sidebar.selectbox("Menu", ["Dashboard", "Encrypt Tool", "Logs", "About", "Logout"])
-        if page == "Dashboard":
+        menu = st.sidebar.selectbox("Menu", ["Dashboard", "Encrypt Tool", "Logs", "About", "Logout"])
+        if menu == "Dashboard":
             page_dashboard()
-        elif page == "Encrypt Tool":
-            page_encrypt()
-        elif page == "Logs":
+        elif menu == "Encrypt Tool":
+            page_encrypt_tool()
+        elif menu == "Logs":
             page_logs()
-        elif page == "About":
+        elif menu == "About":
             page_about()
-        elif page == "Logout":
-            logout_user()
+        elif menu == "Logout":
+            logout_session()
             st.success("Logged out.")
             st.experimental_rerun()
     else:
-        page = st.sidebar.selectbox("Menu", ["Login", "Register", "About"])
-        if page == "Login":
+        menu = st.sidebar.selectbox("Menu", ["Login", "Register", "About"])
+        if menu == "Login":
             page_login()
-        elif page == "Register":
+        elif menu == "Register":
             page_register()
-        elif page == "About":
+        elif menu == "About":
             page_about()
 
 if __name__ == "__main__":
